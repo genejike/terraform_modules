@@ -7,8 +7,10 @@ data "terraform_remote_state" "rdsexample" {
     region = "us-east-1"
   }
 }
+
+
 resource "aws_launch_configuration" "terraformer"{
-    image_id = "ami-04a81a99f5ec58529"
+    image_id = var.ami
     instance_type =var.instance_type
     security_groups = [ aws_security_group.terraformer-instance.id ]
     # put the user script in a template file instead of using <<-EOF
@@ -16,6 +18,7 @@ resource "aws_launch_configuration" "terraformer"{
       server_port = var.server_port
       db_address = data.terraform_remote_state.rdsexample.outputs.address
       db_port = data.terraform_remote_state.rdsexample.outputs.port
+      server_text =var.server_text
     })
     lifecycle {
       create_before_destroy = true
@@ -25,20 +28,72 @@ resource "aws_launch_configuration" "terraformer"{
 
 
 resource "aws_autoscaling_group" "terra" {
+    name = var.cluster_name
     launch_configuration = aws_launch_configuration.terraformer.name
     target_group_arns = [ aws_lb_target_group.alb-target.arn ]
     vpc_zone_identifier  = data.aws_subnets.default.ids
     health_check_type = "ELB"
     min_size = var.min_size
     max_size = var.max_size
+  # Wait for at least this many instances to pass health checks before
+  # considering the ASG deployment complete
+    # min_elb_capacity = var.min_size
+    # use instance refresh to roll out changes to the asg
+    instance_refresh {
+      strategy = "Rolling"
+      preferences {
+        min_healthy_percentage = 50
+      }
+    }
     tag {
       key = "Name"
       value = "${var.cluster_name}-alb"
       propagate_at_launch = true
     }
-    lifecycle {
-      create_before_destroy = true
+     dynamic "tag" {
+    for_each = {
+      for key, value in var.custom_tags:
+      key => upper(value)
+      if key != "Name"
     }
+
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+    # lifecycle {
+    #   create_before_destroy = true
+    # }
+    
+    
+}
+# it is  used when you do code refactoring like changing  names of resources so terraform
+ # doesnt delete the old one and create a new one rather it treats it the same and just renames it 
+# moved {
+#   from = aws_instance .terra
+#   to = aws_instance .terraform
+# }
+resource "aws_autoscaling_schedule" "scaling_out_during_business_hours"{
+  count = var.enable_autoscaling ? 1 : 0
+    autoscaling_group_name = aws_autoscaling_group.terra.name
+    scheduled_action_name = "scaling_out_during_business_hours"
+    min_size = 1
+    max_size = 2
+    desired_capacity = 2
+    recurrence = "0 9 * * *"
+  
+}
+resource "aws_autoscaling_schedule" "scale_in_at_night"{
+  count = var.enable_autoscaling ? 1 : 0
+    scheduled_action_name = "scale_in_at_night"
+    min_size = 2
+    max_size = 10
+    desired_capacity = 2
+    recurrence = "0 17 * * *"
+    autoscaling_group_name = aws_autoscaling_group.terra.name
+  
 }
 
 resource "aws_lb" "terraformer" {
